@@ -1,0 +1,343 @@
+---
+title: "Final Code"
+author: "20307130030 Shen Jianzhi"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+header-includes:
+- \usepackage{amsmath,amsfonts,amsthm,amssymb,MnSymbol,hyperref,indentfirst}
+- \linespread{1.4}
+- \setlength{\parindent}{2em}
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(echo = TRUE)
+library(xtable)
+library(data.table)
+library(lalonde)
+library(tidyverse)
+library(dagitty)
+library(ggdag)
+library(ggplot2)
+library(samplingbook)
+library(VIM)
+library(mice)
+library(LaplacesDemon)
+library(MatchIt)
+library(WeightIt)
+library(cobalt)
+library(did)
+library(DRDID)
+library(EValue)
+```
+
+## Load Data
+
+```{r}
+nsw <- data.table(lalonde::nsw)
+nsw$re74 <- NA
+nsw.treated <- nsw[nsw$treat == 1, ]
+dw <- data.table(lalonde::nsw_dw)
+dw.treated <- dw[dw$treat == 1, ]
+psid1 <- rbind(nsw.treated, psid_controls)[, Dataset := "NSW-PSID-1"]
+psid2 <- rbind(nsw.treated, psid_controls2)[, Dataset := "NSW-PSID-2"]
+psid3 <- rbind(nsw.treated, psid_controls3)[, Dataset := "NSW-PSID-3"]
+cps1 <- rbind(nsw.treated, cps_controls)[, Dataset := "NSW-CPS-1"]
+cps2 <- rbind(nsw.treated, cps_controls2)[, Dataset := "NSW-CPS-2"]
+cps3 <- rbind(nsw.treated, cps_controls3)[, Dataset := "NSW-CPS-3"]
+psid1_dw <- rbind(dw.treated, psid_controls)[, Dataset := "DW-PSID-1"]
+psid2_dw <- rbind(dw.treated, psid_controls2)[, Dataset := "DW-PSID-2"]
+psid3_dw <- rbind(dw.treated, psid_controls3)[, Dataset := "DW-PSID-3"]
+cps1_dw <- rbind(dw.treated, cps_controls)[, Dataset := "DW-CPS-1"]
+cps2_dw <- rbind(dw.treated, cps_controls2)[, Dataset := "DW-CPS-2"]
+cps3_dw <- rbind(dw.treated, cps_controls3)[, Dataset := "DW-CPS-3"]
+nsw[, Dataset := "NSW"]
+dw[, Dataset := "DW"]
+data <-
+  rbind(
+    nsw,
+    psid1,
+    psid2,
+    psid3,
+    cps1,
+    cps2,
+    cps3,
+    dw,
+    psid1_dw,
+    psid2_dw,
+    psid3_dw,
+    cps1_dw,
+    cps2_dw,
+    cps3_dw
+  )
+data[, Dataset := factor(Dataset, unique(data$Dataset))]
+```
+
+## Data Summary
+
+```{r, warning=FALSE}
+mean.se<-function(x){
+  if(is.na(x)[1])return('')
+  mean<-mean(x)
+  se<-sd(x)/sqrt(length(x))
+  return(paste0(round(mean,2),'(',round(se,2),')'))
+}
+smr<-merge(
+  data[,.(`no. obs`=.N),by=.(Dataset, treat)][Dataset=='NSW'| Dataset=='DW' | treat==0,],
+  data[,lapply(.SD, mean.se), by=.(Dataset, treat)][Dataset=='NSW'| Dataset=='DW' |treat==0,]
+)
+kable(smr[order(Dataset,-treat)])
+```
+
+## Factorize
+
+```{r}
+race <- numeric(length(data$black))
+for (i in 1:length(data$black)) {
+  if (data$black[i] == 1)
+    race[i] <- 1
+  if (data$hispanic[i] == 1)
+    race[i] <- 2
+}
+u75 <- numeric(length(data$re75))
+u74 <- numeric(length(data$re74))
+for (i in 1:length(data$re74)) {
+  if (is.na(data$re74[i]))
+    u74[i] <- NA
+  else if (data$re74[i] == 0)
+    u74[i] <- 1
+  if (data$re75[i] == 0)
+    u75[i] <- 1
+}
+data[, race := factor(race)]
+data[, u74 := factor(u74)]
+data[, u75 := factor(u75)]
+data$treat<-factor(data$treat)
+data$married<-factor(data$married)
+data$nodegree<-factor(data$nodegree)
+```
+
+## Experimental Result
+
+```{r}
+ATE<-function(dt){
+  y1<-dt[dt$treat==1,]$re78
+  y0<-dt[dt$treat==0,]$re78
+  n1<-length(y1)
+  n0<-length(y0)
+  ate<-mean(y1)-mean(y0)
+  se<-sqrt(var(y1)/n1+var(y0)/n0)
+  return(list("ATE"=round(ate, 2), "SE"=round(se,2)))
+}
+results.ATE<-data[data$Dataset=="NSW" | data$Dataset=="DW",ATE(.SD),by=.(Dataset)]
+kable(results.ATE,escape=FALSE)
+```
+
+## Regression
+
+```{r}
+no<-re78~treat
+dem<-re78~treat+age+education+race+married+nodegree
+sqage<-re78~treat+age+I(age^2)+education+race+married+nodegree
+hist<-re78~treat+re75
+ts<-re78~treat+re74+re75
+all.but.74<-re78~treat+age+education+race+married+nodegree+re75
+all<-re78~treat+age+education+race+married+nodegree+re74+re75
+sqage.all.but.74<-re78~treat+age+I(age^2)+education+race+married+nodegree+re75
+sqage.all<-re78~treat+age+I(age^2)+education+race+married+nodegree+re74+re75
+
+sens1<-re78~treat+age+education+race+nodegree+re74+re75  # Drop Marriage
+sens2<-re78~treat+education+race+married+nodegree+re74+re75  # Drop Age
+sens3<-re78~treat+age+education+race+married+nodegree+re74  # Drop re75
+
+specifications.but.74<-c(dem, sqage, hist, all.but.74, sqage.all.but.74)
+
+specifications<-c(ts, all, sqage.all)
+
+sensitivity<-c(all, sens1,sens2,sens3)
+
+reg.est<-function(dt, formula){
+  fit<-lm(formula, data=dt)
+  co<-summary(fit)$coefficients
+  ate<-co[2,1]
+  se<-co[2,2]
+  return(paste0(round(ate,2), '(', round(se,2), ')'))
+}
+
+reg.result.but.74<-data[,reg.est(.SD,no),by=.(Dataset)]
+for(formula in specifications.but.74){
+  reg.result.but.74<-merge(reg.result.but.74,data[,reg.est(.SD,formula),by=.(Dataset)],by='Dataset', all.x=TRUE, suffixes=c('', formula))
+}
+kable(reg.result.but.74, escape=FALSE)
+
+reg.result<-data[grepl('DW', data$Dataset),reg.est(.SD,no),by=.(Dataset)]
+for(formula in specifications){
+  reg.result<-merge(reg.result,data[grepl('DW', data$Dataset),reg.est(.SD,formula),by=.(Dataset)],by='Dataset', all.x=TRUE, suffixes=c('', formula))
+}
+kable(reg.result, escape=FALSE)
+
+reg.sens<-data[grepl('DW', data$Dataset),reg.est(.SD,no),by=.(Dataset)]
+for(formula in sensitivity){
+  reg.sens<-merge(reg.sens,data[grepl('DW', data$Dataset),reg.est(.SD,formula),by=.(Dataset)],by='Dataset', all.x=TRUE, suffixes=c('', formula))
+}
+kable(reg.sens, escape=FALSE)
+```
+
+## Regression Sensitivity Analysis
+
+```{r}
+ols = lm(re78~treat+age+education+race+married+nodegree+re74+re75, data=data[data$Dataset=='DW-PSID-1'])
+evalues.OLS(751.95, se=915.26, sd=summary(ols)$sigma, delta=1)
+```
+
+## Effect Modification
+
+```{r}
+data.temp<-data[data$Dataset=='NSW']
+u75i<-re78~treat*u75
+agei<-re78~treat*age
+edui<-re78~treat*education
+blai<-re78~treat*black
+hisi<-re78~treat*hispanic
+mari<-re78~treat*married
+droi<-re78~treat*nodegree
+fmls<-c(u75i, agei, edui, blai, hisi, mari, droi)
+coefs<-c('u75', 'age', 'edu', 'bla', 'his', 'mar', 'dro')
+em.result<-numeric()
+for (em in fmls){
+  fit<-lm(em, data=data.temp)
+  em.result<-c(em.result, paste0(round(summary(fit)$coefficient[4,1],2),'(',round(summary(fit)$coefficient[4,2],2),')'))
+}
+em.result<-data.frame(coef=coefs, em=em.result)
+kable(em.result)
+```
+
+## Propensity Score Screen
+
+```{r}
+pps.fml<-treat~age+education+race+married+nodegree+re74+re75
+data.temp <- data[data$Dataset=='DW-PSID-1']
+PPE<-glm(pps.fml, family="binomial", data=data.temp)
+data.temp$ps<-PPE$fitted.values
+ggplot(data.temp,aes(ps,fill=treat))+geom_histogram(position="identity", alpha=0.5,bins=30)+scale_y_sqrt()
+data.screened<-data.temp[data.temp$ps>=min(data.temp[data.temp$treat==1]$ps)&data.temp$ps<=max(data.temp[data.temp$treat==0]$ps)]
+PPE<-glm(pps.fml, family="binomial", data=data.screened)
+data.screened$ps<-PPE$fitted.values
+ggplot(data.screened,aes(ps,fill=treat))+geom_histogram(position="identity", alpha=0.5,bins=30)+scale_y_sqrt()
+```
+
+## Check Covariate Balance
+
+```{r}
+pps.fml<-treat~age+education+race+married+nodegree+re74+re75
+match.instance<-matchit(pps.fml, data=data.screened, replace=TRUE)
+love.plot(match.instance,stats=c('mean.diffs','ks.statistics'), threshold=c(m=.1,ks=.05))
+weight.instance<-weightit(pps.fml, data = data.screened, estimand="ATE")
+trim(weight.instance, at=.9,lower=TRUE)
+love.plot(weight.instance, stats=c('mean.diffs','ks.statistics'), threshold=c(m=.1,ks=.05))
+```
+
+## P-score Experiment (An instance)
+
+```{r, warning=FALSE}
+pps.fmls<-c(treat~age+education+race+married+nodegree+re74+re75, treat~age+I(age^2)+education+race+married+nodegree+re74+re75,treat~age+education+race+married+nodegree+re75)
+pf<-treat~age+education+race+married+nodegree+re74+re75
+
+weight.se<-function(dt, fml, weight.method){
+  W.out<-weightit(fml, data=dt, method=weight.method, estimand="ATT")
+  d.w<-svydesign(ids=~1, weights=get.w(W.out), data=dt)
+  fit<-svyglm(re78~treat,design=d.w)
+  return(paste0(round(fit$coefficients[2],2), "(", round((confint(fit)[2,2]-coef(fit)[2])/1.95,2), ")"))
+}
+
+match.se<-function(dt, fml, match.method){
+  M.out<-matchit(fml, data=dt, method=match.method, replace=TRUE)
+  temp<-match.data(M.out)
+  est<-weighted.mean(temp[temp$treat==1]$re78, temp[temp$treat==1]$weights)-weighted.mean(temp[temp$treat==0]$re78, temp[temp$treat==0]$weights)
+  boots<-numeric(100)
+  for (i in 1:100){
+    data.temp<-dt[sample(1:length(dt$treat),length(dt$treat),replace=TRUE),]
+    M.out<-matchit(fml, data=data.temp, method=match.method, replace=TRUE)
+    temp<-match.data(M.out)
+    boots[i]<-mean(temp[temp$treat==1]$re78)-mean(temp[temp$treat==0]$re78)
+  }
+  return(paste0(round(est,2),"(", round(sd(boots),2),")"))
+}
+
+ps.func<-function(dt, fml){
+  temp<-dt
+  ppe<-glm(fml, family='binomial', data=temp)
+  temp$ps<-ppe$fitted.values
+  temp<-temp[temp$ps<=max(temp[temp$treat==0]$ps)&temp$ps>=min(temp[temp$treat==1]$ps)]
+  return(list("NM"=match.se(temp, fml, "nearest"), "FM"=match.se(temp,fml,"full"), "IPW"=weight.se(temp,fml,"ps"), "CBPS"=weight.se(temp, fml, "cbps"), "EBAL"=weight.se(temp,fml,"ebal")))
+}
+
+ps.result<-data[grepl("DW-PSID-1", data$Dataset),ps.func(.SD,pf),by=.(Dataset)]
+kable(ps.result)
+```
+
+## Sensitivity Analysis
+
+```{r}
+evalues.MD(2013.92/sd(data$re78[data$Dataset=='DW-PSID-1'&data$treat==1]))
+```
+
+## DID plot
+
+```{r}
+data.did<-data[data$Dataset=='DW-PSID-1']
+data.treat<-data.did[data.did$treat==1]
+data.control<-data.did[data.did$treat==0]
+control.trend<-data.table(data.frame(x=c(74,75,78),
+                y=c(mean(data.control$re74), mean(data.control$re75), mean(data.control$re78)),
+                up=c(mean(data.control$re74)+1.96*sd(data.control$re74)/sqrt(length(data.control)),mean(data.control$re75)+1.96*sd(data.control$re75)/sqrt(length(data.control)),mean(data.control$re78)+1.96*sd(data.control$re78)/sqrt(length(data.control))),
+                low=c(mean(data.control$re74)-1.96*sd(data.control$re74)/sqrt(length(data.control)),mean(data.control$re75)-1.96*sd(data.control$re75)/sqrt(length(data.control)),mean(data.control$re78)-1.96*sd(data.control$re78)/sqrt(length(data.control)))
+))
+treat.trend<-data.table(data.frame(x=c(74,75,78),
+                y=c(mean(data.treat$re74), mean(data.treat$re75), mean(data.treat$re78)),
+                up=c(mean(data.treat$re74)+1.96*sd(data.treat$re74)/sqrt(length(data.treat)),mean(data.treat$re75)+1.96*sd(data.treat$re75)/sqrt(length(data.treat)),mean(data.treat$re78)+1.96*sd(data.treat$re78)/sqrt(length(data.treat))),
+                low=c(mean(data.treat$re74)-1.96*sd(data.treat$re74)/sqrt(length(data.treat)),mean(data.treat$re75)-1.96*sd(data.treat$re75)/sqrt(length(data.treat)),mean(data.treat$re78)-1.96*sd(data.treat$re78)/sqrt(length(data.treat)))
+))
+trend<-rbind(control.trend[,group:='Control'], treat.trend[,group:='Treated'])
+trend$group<-as.factor(trend$group)
+ggplot(trend, aes(x=x,y=y,group=group, color=group)) + geom_point() + geom_line() +
+  geom_errorbar(aes(ymin=low,ymax=up))+xlab("Year")+ylab("Earning")+theme_bw()
+```
+
+## DID experiment
+
+```{r, warning=FALSE}
+simple.did<-function(dt){
+  treat<-dt[dt$treat==1]
+  control<-dt[dt$treat==0]
+  return(paste0(round(mean(treat$re78)-mean(treat$re75)-mean(control$re78)+mean(control$re75),2),"(", round(sqrt(var(treat$re78)/length(treat$re78)+var(treat$re75)/length(treat$re75)+var(control$re78)/length(control$re78)+var(control$re75)/length(control$re75)),2),")"))
+}
+psm.did<-function(dt, fml){
+  temp<-dt
+  ppe<-glm(fml, family='binomial', data=temp)
+  temp$ps<-ppe$fitted.values
+  temp<-temp[temp$ps<=max(temp[temp$treat==0]$ps)&temp$ps>=min(temp[temp$treat==1]$ps)]
+  temp<-match.data(matchit(fml, data=temp, replace=TRUE))
+  treat<-temp[temp$treat==1]
+  control<-temp[temp$treat==0]
+  return(paste0(round(mean(treat$re78)-mean(treat$re75)-mean(control$re78)+mean(control$re75),2),"(", round(sqrt(var(treat$re78)/length(treat$re78)+var(treat$re75)/length(treat$re75)+var(control$re78)/length(control$re78)+var(control$re75)/length(control$re75)),2),")"))
+}
+dr<-function(dt){
+  temp<-data.frame(id=c(),treat=c(),re=c(),year=c(),age=c(),educ=c(),black=c(),married=c(),nodegree=c(),hisp=c(),re74=c())
+  for (i in 1:length(dt$treat)){
+    temp<-rbind(temp, data.frame(id=rep(i,2), treat=rep(dt$treat[i],2),re=c(dt$re75[i],dt$re78[i]),year=c(1975,1978),age=rep(dt$age[i],2),educ=rep(dt$education[i],2),black=rep(dt$black[i],2),married=rep(dt$married[i],2),nodegree=rep(dt$nodegree[i],2),hisp=rep(dt$hispanic[i],2),re74=rep(dt$re74[i],2)))
+  }
+  temp$treat<-as.numeric(temp$treat)-1
+  out<-drdid(yname="re",tname="year",idname="id",dname="treat",xformla=~age+educ+black+married+nodegree+hisp,data=temp, panel=TRUE)
+  return(paste0(round(out$ATT,2),"(",round(out$se,2), ")"))
+}
+did.exp<-function(dt){
+  return(list("DID"=simple.did(dt),"PSMDID"=psm.did(dt,pps.fml),"DRDID"=dr(dt)))
+}
+did.result<-data[grepl("DW", data$Dataset),did.exp(.SD),by=.(Dataset)]
+kable(did.result, espace=FALSE)
+```
